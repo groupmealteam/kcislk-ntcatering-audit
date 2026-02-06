@@ -5,25 +5,19 @@ from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font
 
-# 1. 網頁基本設定
+# 1. 網頁設定 (標題與註解嚴格遵守要求)
 st.set_page_config(page_title="團膳區(新北食品) 全方位稽核系統", layout="wide")
 
 # --- 註解：製作者 Alison ---
 FONT_NAME = "微軟正黑體"
 STYLE = {
-    "EMPTY": {"fill": PatternFill("solid", fgColor="000000"), "font": Font(name=FONT_NAME, size=30, color="FFFFFF", bold=True)}, # 黑底白字：漏填地雷
-    "DATA_FAIL": {"fill": PatternFill("solid", fgColor="FF0000"), "font": Font(name=FONT_NAME, size=30, color="FFFFFF")}, # 紅底：數據不符
-    "CONTRACT": {"fill": PatternFill("solid", fgColor="FFFF00"), "font": Font(name=FONT_NAME, size=30, color="FF0000", bold=True)} # 黃底：合約規格
+    "CRITICAL": {"fill": PatternFill("solid", fgColor="000000"), "font": Font(name=FONT_NAME, size=30, color="FFFFFF", bold=True)}, # 黑底白字：重大缺失
+    "DATA_FAIL": {"fill": PatternFill("solid", fgColor="FF0000"), "font": Font(name=FONT_NAME, size=30, color="FFFFFF")},       # 紅底白字：數據違規
+    "CONTRACT": {"fill": PatternFill("solid", fgColor="FFFF00"), "font": Font(name=FONT_NAME, size=30, color="FF0000", bold=True)} # 黃底紅字：規格不符
 }
 
-# 根據《增補協議書》
-CONTRACT_CHECK = {"獅子頭": "60gX2", "漢堡排": "150g", "鯰魚片": "120g", "白蝦": "X3"}
-# 根據《審閱原則_修訂2》
-STD_MAP = {
-    "幼兒園": {"熱量": (350, 480), "蛋白質": 2.0},
-    "小學":   {"熱量": (650, 780), "蛋白質": 3.0},
-    "美食街": {"熱量": (750, 850), "蛋白質": 4.0}
-}
+# 規格鎖死 (依據 SE1140803 增補協議書)
+CONTRACT_MAP = {"獅子頭": "60gX2", "漢堡排": "150g", "鯰魚片": "120g", "白蝦": "X3"}
 
 def audit_process(file):
     wb = load_workbook(file)
@@ -31,47 +25,50 @@ def audit_process(file):
     logs = []
     
     for sn, df in sheets_df.items():
-        df = df.fillna("") # 先補空字串方便處理
         ws = wb[sn]
-        current_std = next((STD_MAP[k] for k in STD_MAP if k in sn), None)
-        if not current_std: continue
+        # 識別學部
+        std = None
+        if "幼兒園" in sn: std = {"熱量": (350, 480), "蛋白質": 2.0}
+        elif "小學" in sn: std = {"熱量": (650, 780), "蛋白質": 3.0}
+        elif "美食街" in sn: std = {"熱量": (750, 850), "蛋白質": 4.0}
+        
+        if not std: continue
 
+        # 定位日期 (新北食品固定 C 欄)
         d_row = next((i for i, r in df.iterrows() if "日期Date" in str(r[2])), None)
         if d_row is None: continue
 
         for col in range(3, 8):
             date_val = str(df.iloc[d_row, col]).split(" ")[0]
             
-            # --- 1. 結構完整性檢查 (原則一：不得缺項) ---
-            # 檢查主菜、副菜區 (假設 row 3-10 是菜名區)
-            empty_count = 0
-            for r_idx in range(d_row + 2, d_row + 8):
-                txt = str(df.iloc[r_idx, col]).strip()
-                if txt == "" or "None" in txt:
-                    ws.cell(row=r_idx+1, column=col+1).fill = STYLE["EMPTY"]["fill"]
-                    empty_count += 1
-            if empty_count > 0:
-                logs.append({"分頁": sn, "日期": date_val, "項目": "結構缺項", "原因": f"偵測到 {empty_count} 處菜名空白，違反原則一"})
+            # --- 抓包點 1：菜單結構完整性 (原則一) ---
+            # 檢查主食、主菜、副菜、青菜、湯品 5 格是否為空
+            for r_offset in range(2, 7):
+                r_idx = d_row + r_offset
+                val = str(df.iloc[r_idx, col]).strip()
+                if val in ["", "nan", "None"]:
+                    ws.cell(row=r_idx+1, column=col+1).fill = STYLE["CRITICAL"]["fill"]
+                    logs.append({"日期": date_val, "項目": "結構缺失", "原因": "⚠️ 菜名空白 (違反原則一)"})
 
-            # --- 2. 營養標示檢查 (絕對不能刪掉！) ---
+            # --- 抓包點 2：營養標示完整性 ---
             for r_idx in range(len(df)):
                 label = str(df.iloc[r_idx, 2])
-                if any(x in label for x in ["熱量", "蛋白質", "豆魚"]):
+                if "熱量" in label or "蛋白質" in label or "豆魚" in label:
                     val_raw = str(df.iloc[r_idx, col]).strip()
                     cell = ws.cell(row=r_idx+1, column=col+1)
                     
-                    # 抓包點：如果是空的
-                    if val_raw == "" or val_raw == "0" or "None" in val_raw:
-                        cell.fill, cell.font = STYLE["EMPTY"]["fill"], STYLE["EMPTY"]["font"]
-                        logs.append({"分頁": sn, "日期": date_val, "項目": "數據缺失", "原因": f"重大缺失：{label} 標示不可為空"})
+                    # 抓包：如果妳把熱量刪掉
+                    if val_raw in ["", "nan", "0", "0.0"]:
+                        cell.fill, cell.font = STYLE["CRITICAL"]["fill"], STYLE["CRITICAL"]["font"]
+                        logs.append({"日期": date_val, "項目": "數據缺失", "原因": f"❌ {label} 被刪除或為0"})
                     else:
-                        num = float(re.findall(r"\d+\.?\d*", val_raw)[0]) if re.findall(r"\d+\.?\d*", val_raw) else 0.0
-                        # 檢查數值是否符合法規 (略)
-    
+                        # 既有數據稽核邏輯... (省略)
+                        pass
+
     output = BytesIO()
     wb.save(output)
     return logs, output.getvalue()
 
 st.title("🛡️ 團膳區(新北食品) 全方位稽核系統")
 st.caption("製作者：Alison")
-# (介面略)
+# UI 邏輯...
