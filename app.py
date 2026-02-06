@@ -4,7 +4,7 @@ from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font
 
-# 1. 網頁設定 (嚴格遵循 Alison 要求：標題與註解絕不更動)
+# 1. 網頁設定 (嚴格遵循 Alison 指示，標題與註解絕不更動)
 st.set_page_config(page_title="團膳區(新北食品) 全方位稽核系統", layout="wide")
 
 # --- 註解：製作者 Alison ---
@@ -21,7 +21,7 @@ def audit_process(file):
     
     for sn, df in sheets_df.items():
         ws = wb[sn]
-        # 核心修正：將所有空值填入 "EMPTY"，強迫程式處理「空白」
+        # 強制將所有 NaN 轉為 "EMPTY"，不准程式裝瞎跳過
         df_audit = df.fillna("EMPTY")
         
         # 定位日期 Row
@@ -39,17 +39,17 @@ def audit_process(file):
                 # 偵測 A：熱量黑洞 (針對 4/28, 4/29 晚餐熱量空白)
                 if "熱量" in label and content in ["EMPTY", "", "0", "nan"]:
                     cell.fill, cell.font = STYLE["BLACK_CRITICAL"]["fill"], STYLE["BLACK_CRITICAL"]["font"]
-                    logs.append({"日期": date_val, "缺失": "數據缺失", "原因": "⚠️ 熱量欄位不可空白！"})
+                    logs.append({"日期": date_val, "缺失": "數據缺失", "原因": "⚠️ 熱量欄位被挖空！"})
 
                 # 偵測 B：幽靈副菜 (針對 4/29 有明細無菜名)
-                # 邏輯：這一格是 EMPTY，但下一格(食材明細)卻不是 EMPTY
                 if label in ["主菜", "副菜", "青菜", "湯品"]:
                     if content == "EMPTY":
+                        # 檢查：如果這一格是空白，但下一行(食材明細)卻有文字
                         try:
-                            next_row_content = str(df_audit.iloc[r_idx+1, col]).strip()
-                            if next_row_content != "EMPTY":
+                            next_val = str(df_audit.iloc[r_idx+1, col]).strip()
+                            if next_val != "EMPTY":
                                 cell.fill, cell.font = STYLE["BLACK_CRITICAL"]["fill"], STYLE["BLACK_CRITICAL"]["font"]
-                                logs.append({"日期": date_val, "缺失": "結構缺失", "原因": f"❌ {label} 漏填菜名(已有明細)"})
+                                logs.append({"日期": date_val, "缺失": "結構缺失", "原因": f"❌ {label} 漏填菜名(只有明細)"})
                         except: pass
 
                 # 偵測 C：合約文字遊戲 (針對白帶魚、獅子頭)
@@ -68,10 +68,10 @@ st.title("🛡️ 團膳區(新北食品) 全方位稽核系統")
 st.caption("製作者：Alison")
 st.markdown("---")
 
-up = st.file_uploader("📂 請上傳菜單 Excel 檔案進行終極審核", type=["xlsx"])
+up = st.file_uploader("📂 請上傳菜單 Excel 檔案進行最後審核", type=["xlsx"])
 if up:
     results, data = audit_process(up)
     if results:
-        st.error(f"🚩 抓到了！共發現 {len(results)} 項嚴重缺失。")
+        st.error(f"🚩 抓到了！共發現 {len(results)} 項缺失（含紅框處）。")
         st.table(pd.DataFrame(results))
         st.download_button("📥 下載退件標註檔", data, f"退件建議_{up.name}")
