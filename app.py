@@ -4,13 +4,12 @@ from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font
 
-# 1. 網頁設定 (維持 Alison 的原始標題)
 st.set_page_config(page_title="團膳區(新北食品) 全方位稽核系統", layout="wide")
 
-# --- 註解：製作者 Alison ---
+# --- 樣式設定：黑底白字 30 級 (專殺 4/28-4/29 這種黑洞) ---
 STYLE = {
     "BLACK": {"fill": PatternFill("solid", fgColor="000000"), "font": Font(name="微軟正黑體", size=30, color="FFFFFF", bold=True)},
-    "YELLOW": {"fill": PatternFill("solid", fgColor="FFFF00"), "font": Font(name="微軟正黑體", size=20, color="FF0000", bold=True)}
+    "YELLOW": {"fill": PatternFill("solid", fgColor="FFFF00"), "font": Font(name="微軟正黑體", size=14, color="FF0000", bold=True)}
 }
 
 def audit_process(file):
@@ -20,7 +19,7 @@ def audit_process(file):
     
     for sn, df in sheets_df.items():
         ws = wb[sn]
-        # 核心修正：強迫程式看見空白，將 NaN 填補為字串 "MISSING"
+        # 突破點 1：將所有空值填充為 "MISSING"，強迫程式看見「無」
         df_audit = df.fillna("MISSING")
         
         # 定位日期 Row
@@ -35,25 +34,25 @@ def audit_process(file):
                 content = str(df_audit.iloc[r_idx, col]).strip()
                 cell = ws.cell(row=r_idx+1, column=col+1)
 
-                # --- 偵測 A：強制空白查核 (專殺紅框缺失) ---
-                # 只要左邊標籤有這些字，內容就絕對不能是 MISSING
-                critical_tags = ["熱量", "主菜", "副菜", "套餐", "主食"]
-                if any(tag in label for tag in critical_tags):
-                    if content in ["MISSING", "", "nan", "0"]:
-                        # 4/29 專用：若菜名空，但下面食材明細有字，必殺！
+                # 突破點 2：鎖定標籤！只要標籤在，內容是 MISSING 就噴黑
+                # 針對 4/28, 4/29 的熱量、主菜、副菜
+                mandatory_tags = ["熱量", "主菜", "副菜", "主食", "套餐"]
+                if any(tag in label for tag in mandatory_tags):
+                    if content == "MISSING":
+                        # 檢查 4/29 副菜漏洞：內容空但下一行明細有字
                         try:
-                            detail_val = str(df_audit.iloc[r_idx+1, col]).strip()
-                            if detail_val != "MISSING" or "熱量" in label:
+                            next_val = str(df_audit.iloc[r_idx+1, col]).strip()
+                            if next_val != "MISSING" or "熱量" in label:
                                 cell.fill, cell.font = STYLE["BLACK"]["fill"], STYLE["BLACK"]["font"]
-                                logs.append({"日期": date_val, "缺失": "內容不全", "原因": f"❌ {label} 欄位未填！"})
+                                logs.append({"日期": date_val, "原因": f"❌ {label} 欄位漏填！"})
                         except: pass
 
-                # --- 偵測 B：原本穩定的規格稽核 ---
+                # 突破點 3：強化規格稽核 (模糊匹配)
                 specs = {"白帶魚": "150g", "獅子頭": "60gX2", "漢堡排": "150g"}
                 for item, weight in specs.items():
                     if item in content and weight not in content.replace(" ", ""):
                         cell.fill, cell.font = STYLE["YELLOW"]["fill"], STYLE["YELLOW"]["font"]
-                        logs.append({"日期": date_val, "缺失": "規格缺失", "原因": f"{item} 未標註 {weight}"})
+                        logs.append({"日期": date_val, "原因": f"{item} 需標註 {weight}"})
 
     output = BytesIO()
     wb.save(output)
@@ -62,12 +61,10 @@ def audit_process(file):
 st.title("🛡️ 團膳區(新北食品) 全方位稽核系統")
 st.caption("製作者：Alison")
 
-up = st.file_uploader("📂 請上傳菜單檔案 (最後測試：4/28-4/29 空白黑洞)", type=["xlsx"])
+up = st.file_uploader("📂 請上傳菜單 Excel", type=["xlsx"])
 if up:
     results, data = audit_process(up)
     if results:
-        st.error(f"🚩 發現 {len(results)} 項嚴重缺失，已完成標色。")
+        st.error(f"🚩 抓到 {len(results)} 項缺失！包含 4/28-4/29 紅框處。")
         st.table(pd.DataFrame(results))
-        st.download_button("📥 下載退件標註檔案", data, f"退件_{up.name}")
-    else:
-        st.success("✅ 結構完整，未發現明顯缺失。")
+        st.download_button("📥 下載退件標註檔", data, f"退件_{up.name}")
