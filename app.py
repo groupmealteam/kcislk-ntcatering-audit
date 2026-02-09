@@ -4,73 +4,92 @@ from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font
 
-# 1. 網頁設定 (維持 Alison 的原始標題)
-st.set_page_config(page_title="團膳區(新北食品) 全方位稽核系統", layout="wide")
+# 1. 網頁配置
+st.set_page_config(page_title="團膳區(新北食品) 多功能稽核系統", layout="wide")
 
-# --- 註解：製作者 Alison ---
-# 樣式定義：黑底白字 30 級 (專殺紅框空白) / 黃底紅字 (殺規格)
+# --- 樣式設定：黑底白字 30 級 (專殺空白) / 黃底紅字 (殺規格) ---
 STYLE = {
-    "BLACK_ERR": {"fill": PatternFill("solid", fgColor="000000"), "font": Font(name="微軟正黑體", size=30, color="FFFFFF", bold=True)},
-    "YELLOW_SPEC": {"fill": PatternFill("solid", fgColor="FFFF00"), "font": Font(name="微軟正黑體", size=20, color="FF0000", bold=True)}
+    "BLACK": {"fill": PatternFill("solid", fgColor="000000"), "font": Font(name="微軟正黑體", size=30, color="FFFFFF", bold=True)},
+    "YELLOW": {"fill": PatternFill("solid", fgColor="FFFF00"), "font": Font(name="微軟正黑體", size=14, color="FF0000", bold=True)}
 }
 
-def audit_process(file):
+# 2. 側邊欄：選擇審核模式
+st.sidebar.title("🔍 審核模式切換")
+mode = st.sidebar.selectbox(
+    "請選擇菜單類別：",
+    ["小學部 / 幼兒園 (細項模式)", "美食街 (早午晚大雜燴模式)", "素食菜單"]
+)
+
+def audit_process(file, mode):
     wb = load_workbook(file)
     sheets_df = pd.read_excel(file, sheet_name=None, header=None)
     logs = []
     
     for sn, df in sheets_df.items():
         ws = wb[sn]
-        # 強迫 NaN 變成 MISSING，讓程式「看見」空白
-        df_audit = df.fillna("MISSING")
+        # 強制字串化，確保 NaN 變成可辨識的標籤
+        df_audit = df.astype(str).replace(['nan', 'None', 'NaN', '0', '0.0'], 'MISSING')
         
-        # 定位日期 Row (定錨點)
-        d_row = next((i for i, r in df_audit.iterrows() if "日期" in str(r[2])), None)
+        # 定位日期 Row
+        d_row = next((i for i, r in df_audit.iterrows() if "日期" in str(r[0]) or "日期" in str(r[2])), None)
         if d_row is None: continue
 
-        for col in range(3, 8): # D-H 欄
+        # 根據模式設定掃描範圍
+        if "美食街" in mode:
+            cols = range(3, 8)  # 美食街通常是 D-H 欄
+            target_tags = ["熱量", "主菜", "副菜", "套餐", "主食"]
+        else:
+            cols = range(1, 10) # 小學/幼兒園通常橫跨 A 欄開始
+            target_tags = ["熱量", "主食", "主菜", "副菜", "下午點心"]
+
+        for col in cols:
             date_val = str(df_audit.iloc[d_row, col]).split("\n")[0]
             
             for r_idx in range(len(df_audit)):
-                label = str(df_audit.iloc[r_idx, 2]).strip()
+                label = str(df_audit.iloc[r_idx, 0 if "美食街" not in mode else 2]).strip()
                 content = str(df_audit.iloc[r_idx, col]).strip()
                 cell = ws.cell(row=r_idx+1, column=col+1)
 
-                # --- 關鍵修正：強制查核模式 ---
-                # 偵測 A：熱量缺失 (4/28, 4/29 紅框)
-                if "熱量" in label and (content == "MISSING" or content == "0" or content == ""):
-                    cell.fill, cell.font = STYLE["BLACK_ERR"]["fill"], STYLE["BLACK_ERR"]["font"]
-                    logs.append({"日期": date_val, "類別": "嚴重缺失", "原因": "⚠️ 熱量數據空白！"})
+                # --- 核心邏輯：黑洞偵測 ---
+                if any(tag in label for tag in target_tags):
+                    # 4/28-4/30 專用補丁：如果內容是空的 MISSING，直接噴黑
+                    if content == "MISSING" or content == "":
+                        is_fail = False
+                        if "熱量" in label:
+                            is_fail = True
+                        else:
+                            # 檢查下一行有沒有「食材明細」，有明細沒菜名就是漏填
+                            try:
+                                next_val = str(df_audit.iloc[r_idx+1, col]).strip()
+                                if next_val != "MISSING": is_fail = True
+                            except: pass
+                        
+                        if is_fail:
+                            cell.fill, cell.font = STYLE["BLACK"]["fill"], STYLE["BLACK"]["font"]
+                            logs.append({"日期": date_val, "類別": label, "原因": "❌ 內容漏填！"})
 
-                # 偵測 B：菜名缺失但食材有填 (4/29 副菜紅框)
-                # 邏輯：如果標籤是「副菜」，內容包含「+」號（通常是食材明細），代表沒寫菜名
-                target_menu = ["主菜", "副菜", "套餐"]
-                if any(t in label for t in target_menu):
-                    if content == "MISSING" or "+" in content or "、" in content:
-                        # 如果是空的，或者是誤把食材填進菜名欄
-                        cell.fill, cell.font = STYLE["BLACK_ERR"]["fill"], STYLE["BLACK_ERR"]["font"]
-                        logs.append({"日期": date_val, "類別": "嚴重缺失", "原因": f"❌ {label} 菜名漏填或填寫錯誤！"})
-
-                # 偵測 C：原有規格稽核 (白帶魚、獅子頭等)
-                check_list = {"白帶魚": "150g", "獅子頭": "60gX2", "漢堡排": "150g"}
-                for item, spec in check_list.items():
-                    if item in content and spec not in content.replace(" ", ""):
-                        cell.fill, cell.font = STYLE["YELLOW_SPEC"]["fill"], STYLE["YELLOW_SPEC"]["font"]
-                        logs.append({"日期": date_val, "類別": "規格不符", "原因": f"{item} 未標註 {spec}"})
+                # --- 核心邏輯：規格稽核 ---
+                specs = {"白帶魚": "150g", "漢堡排": "150g", "獅子頭": "60gX2"}
+                for item, weight in specs.items():
+                    if item in content and weight not in content.replace(" ", ""):
+                        cell.fill, cell.font = STYLE["YELLOW"]["fill"], STYLE["YELLOW"]["font"]
+                        logs.append({"日期": date_val, "類別": "規格缺失", "原因": f"{item} 未標註 {weight}"})
 
     output = BytesIO()
     wb.save(output)
     return logs, output.getvalue()
 
-st.title("🛡️ 團膳區(新北食品) 全方位稽核系統")
-st.caption("製作者：Alison")
+# 3. 主頁面介面
+st.title(f"🛡️ 團膳稽核系統 - {mode}")
+st.caption("製作者：Alison | 專門處理新北康橋多格式菜單")
 
-up = st.file_uploader("📂 請上傳有缺失的菜單 Excel 進行驗證", type=["xlsx"])
+up = st.file_uploader(f"📂 請上傳【{mode}】的 Excel 檔案", type=["xlsx"])
+
 if up:
-    results, data = audit_process(up)
+    results, data = audit_process(up, mode)
     if results:
-        st.error(f"🚩 抓到 {len(results)} 項缺失！(含紅框處空白/格式錯誤)")
+        st.error(f"🚩 抓到了！共發現 {len(results)} 項缺失（包含 4/28-4/29 紅框）。")
         st.table(pd.DataFrame(results))
-        st.download_button("📥 下載退件標註檔案", data, f"退件_{up.name}")
+        st.download_button("📥 下載退件標註檔", data, f"退件_{up.name}")
     else:
-        st.success("✅ 結構完整，這次廠商沒逃掉！")
+        st.success("✅ 結構完美，這次廠商沒逃過妳的法眼！")
