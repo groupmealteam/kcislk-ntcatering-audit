@@ -1,71 +1,105 @@
 import streamlit as st
 import pandas as pd
 import re
+from io import BytesIO
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill, Font
 
-# 1. 定義【專業營養師眼光】關鍵字與符號
-# 同步菜單定義：◎=油炸, △=加工品, ★=帶殼海鮮 [cite: 73, 113, 117]
+# 1. 定義專業稽核紅線
 TAGS_FRIED = ["炸", "酥", "裹粉", "爆", "脆", "可樂餅", "◎"] 
 TAGS_PROCESSED = ["丸", "排", "素羊", "素火腿", "素肉", "獅子頭", "豆包", "炸豆腐", "△", "★"]
-TAGS_FREQUENT = ["豆芽", "銀芽", "芽菜"] # 郁恩特別在意的頻率控管 [cite: 73]
+TAGS_FREQUENT = ["豆芽", "銀芽", "芽菜"]
+TAGS_SEASONING = ["沙茶", "咖哩", "腐乳", "三杯", "麻婆", "糖醋"]
 
-def expert_audit(df, sheet_name):
-    logs = []
-    fried_indices = [] # 紀錄炸物出現的日期
-    veg_counter = 0
-    
-    # 偵測本週天數
-    date_row = None
-    days_count = 0
-    for i in range(min(15, len(df))):
-        if any(k in str(df.iloc[i, 2]) for k in ["日期", "Date"]):
-            date_row = i
-            break
-    if date_row is not None:
-        for col in range(2, 7):
-            if "202" in str(df.iloc[date_row, col]): days_count += 1
+def process_excel(uploaded_file):
+    # 讀取 Excel
+    wb = load_workbook(uploaded_file)
+    output_logs = []
+    red_fill = PatternFill(start_color="FFFF0000", end_color="FFFF0000", fill_type="solid")
+    white_font = Font(color="FFFFFF", bold=True)
 
-    for col in range(2, 7):
-        if col >= len(df.columns): break
-        date_txt = str(df.iloc[date_row, col]).split(" ")[0] if date_row else "未知"
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        df = pd.DataFrame(ws.values)
         
-        for r_idx in range(len(df)):
-            cell = str(df.iloc[r_idx, col]).strip()
-            if len(cell) < 1 or "nan" in cell: continue
+        fried_count = 0
+        veg_count = 0
+        used_seasoning = set()
+        
+        # 偵測日期列與天數
+        date_row = None
+        days_count = 0
+        for i in range(min(15, df.shape[0])):
+            if any(k in str(df.iloc[i, 2]) for k in ["日期", "Date"]):
+                date_row = i
+                break
+        
+        if date_row is not None:
+            for col in range(2, 7):
+                if "202" in str(df.iloc[date_row, col]): days_count += 1
 
-            # A. 炸物累計 (包含◎符號) [cite: 113, 117]
-            if any(f in cell for f in TAGS_FRIED):
-                fried_indices.append(date_txt)
-                limit = 1 if days_count < 5 else 1 # 堅持短週/一般週嚴格限制
-                if len(fried_indices) > limit:
-                    logs.append({"日期": date_txt, "項目": cell, "原因": f"🚩炸物超標(當週累計{len(fried_indices)}次)"})
+            # 開始逐格稽核 (C欄到G欄，即 index 2 到 6)
+            for col_idx in range(3, 8): # Openpyxl 是 1-based
+                for row_idx in range(1, ws.max_row + 1):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    val = str(cell.value).strip() if cell.value else ""
+                    if len(val) < 1 or val == "None": continue
 
-            # B. 加工品規格 (包含△符號，依增補協議需標規格) [cite: 82, 117]
-            if any(p in cell for p in TAGS_PROCESSED):
-                if not re.search(r"(\d+[xX*×]\d+)|(\d+\s*[gG克])", cell):
-                    logs.append({"日期": date_txt, "項目": cell, "原因": "⚠️規格未標：加工品/素料/成品需標數量或克數"})
+                    issue = None
+                    # A. 炸物累計
+                    if any(f in val for f in TAGS_FRIED):
+                        fried_count += 1
+                        limit = 1 if days_count < 5 else 1
+                        if fried_count > limit:
+                            issue = f"🚩炸物超標({fried_count}次)"
 
-            # C. 豆芽頻率控管 (郁恩專業意見) 
-            if any(v in cell for v in TAGS_FREQUENT):
-                veg_counter += 1
-                if veg_counter > 1:
-                    logs.append({"日期": date_txt, "項目": cell, "原因": "❌食材重複：豆芽類當週出現過高"})
+                    # B. 加工品規格
+                    if any(p in val for p in TAGS_PROCESSED):
+                        if not re.search(r"(\d+[xX*×]\d+)|(\d+\s*[gG克])", val):
+                            issue = "⚠️規格未標註"
 
-    return logs
+                    # C. 豆芽頻率
+                    if any(v in val for v in TAGS_FREQUENT):
+                        veg_count += 1
+                        if veg_count > 1:
+                            issue = "❌食材重複(豆芽)"
 
-# --- 介面呈現 ---
-st.title("🛡️ 康橋林口：專業對齊版稽核系統")
-st.markdown("##### 核心邏輯：將營養師專業直覺數位化，包含隱藏加工品與頻率控管。")
+                    # 如果有問題，標色並紀錄
+                    if issue:
+                        cell.fill = red_fill
+                        cell.font = white_font
+                        output_logs.append({
+                            "分頁": sheet_name,
+                            "項目": val,
+                            "問題": issue
+                        })
 
-f = st.file_uploader("📂 請上傳菜單 Excel", type=["xlsx"])
+    # 儲存到記憶體供下載
+    virtual_workbook = BytesIO()
+    wb.save(virtual_workbook)
+    virtual_workbook.seek(0)
+    return virtual_workbook, output_logs
+
+# --- Streamlit 介面 ---
+st.set_page_config(page_title="康橋膳食自動標記系統", layout="wide")
+st.title("🛡️ 康橋林口：膳食稽核與「紅字標記」系統")
+st.info("上傳後，系統會自動在 Excel 裡將違規格子「塗紅」，妳可以直接下載發給廠商。")
+
+f = st.file_uploader("📂 上傳新北食品 Excel 菜單", type=["xlsx"])
+
 if f:
-    sheets = pd.read_excel(f, sheet_name=None, header=None)
-    all_res = []
-    for sn, df in sheets.items():
-        res = expert_audit(df, sn)
-        for r in res: r['分頁'] = sn; all_res.append(r)
+    processed_file, logs = process_excel(f)
     
-    if all_res:
-        st.error(f"🚨 系統依據營養師標準發現 {len(all_res)} 項疑義：")
-        st.table(pd.DataFrame(all_res)[['分頁', '日期', '項目', '原因']])
+    if logs:
+        st.error(f"🚨 發現 {len(logs)} 處違規！已自動在 Excel 中標記紅色。")
+        st.table(pd.DataFrame(logs))
+        
+        # 下載按鈕
+        st.download_button(
+            label="📥 下載「紅字標記版」菜單給廠商",
+            data=processed_file,
+            file_name="新北食品菜單_審核修改版.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
     else:
-        st.success("✅ 檢查完畢！本週菜單符合專業與合約標準。")
+        st.success("✅ 檢查完畢，未發現違規項目。")
