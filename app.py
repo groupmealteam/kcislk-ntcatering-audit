@@ -2,21 +2,18 @@ import streamlit as st
 import pandas as pd
 import re
 
-# --- 1. 模擬營養師郁恩的【高強度關鍵字庫】 ---
-TAGS_FRIED = ["炸", "酥", "裹粉", "爆爆", "薯", "雞塊", "酥", "脆", "可樂餅"]
-# 擴大加工品認定：包含素肉系列
-TAGS_PROCESSED = ["丸", "排", "素肉", "素羊", "素雞", "火腿", "獅子頭", "肉燥", "捲", "豆包", "炸豆腐", "甜不辣"]
-# 調味與食材頻率監控
-TAGS_SEASONING = ["沙茶", "咖哩", "腐乳", "三杯", "麻婆", "糖醋", "沙拉"]
-TAGS_FREQUENT_VEG = ["豆芽", "銀芽", "芽菜"]
+# 1. 定義【專業營養師眼光】關鍵字與符號
+# 同步菜單定義：◎=油炸, △=加工品, ★=帶殼海鮮 [cite: 73, 113, 117]
+TAGS_FRIED = ["炸", "酥", "裹粉", "爆", "脆", "可樂餅", "◎"] 
+TAGS_PROCESSED = ["丸", "排", "素羊", "素火腿", "素肉", "獅子頭", "豆包", "炸豆腐", "△", "★"]
+TAGS_FREQUENT = ["豆芽", "銀芽", "芽菜"] # 郁恩特別在意的頻率控管 [cite: 73]
 
-def audit_expert_logic(df, sheet_name):
+def expert_audit(df, sheet_name):
     logs = []
-    fried_count = 0
-    veg_count = 0
-    seasoning_set = set()
+    fried_indices = [] # 紀錄炸物出現的日期
+    veg_counter = 0
     
-    # 偵測天數
+    # 偵測本週天數
     date_row = None
     days_count = 0
     for i in range(min(15, len(df))):
@@ -27,56 +24,48 @@ def audit_expert_logic(df, sheet_name):
         for col in range(2, 7):
             if "202" in str(df.iloc[date_row, col]): days_count += 1
 
-    # 開始掃描
     for col in range(2, 7):
         if col >= len(df.columns): break
-        date_label = str(df.iloc[date_row, col]).split(" ")[0] if date_row else "未知"
+        date_txt = str(df.iloc[date_row, col]).split(" ")[0] if date_row else "未知"
         
         for r_idx in range(len(df)):
             cell = str(df.iloc[r_idx, col]).strip()
-            if len(cell) < 2 or "nan" in cell: continue
+            if len(cell) < 1 or "nan" in cell: continue
 
-            # 1. 炸物嚴查 (跨月短週 1 次)
+            # A. 炸物累計 (包含◎符號) [cite: 113, 117]
             if any(f in cell for f in TAGS_FRIED):
-                fried_count += 1
-                limit = 1 if days_count < 5 else 1 
-                if fried_count > limit:
-                    logs.append({"日期": date_label, "項目": cell, "原因": f"🚩炸物累計{fried_count}次(合約規範短週限1次)"})
+                fried_indices.append(date_txt)
+                limit = 1 if days_count < 5 else 1 # 堅持短週/一般週嚴格限制
+                if len(fried_indices) > limit:
+                    logs.append({"日期": date_txt, "項目": cell, "原因": f"🚩炸物超標(當週累計{len(fried_indices)}次)"})
 
-            # 2. 加工品規格 (郁恩最在意的數量標註)
+            # B. 加工品規格 (包含△符號，依增補協議需標規格) [cite: 82, 117]
             if any(p in cell for p in TAGS_PROCESSED):
                 if not re.search(r"(\d+[xX*×]\d+)|(\d+\s*[gG克])", cell):
-                    logs.append({"日期": date_label, "項目": cell, "原因": "⚠️規格不詳(加工/成品類請標註數量或克數)"})
+                    logs.append({"日期": date_txt, "項目": cell, "原因": "⚠️規格未標：加工品/素料/成品需標數量或克數"})
 
-            # 3. 豆芽類頻率控制 (郁恩 5 月初審意見)
-            if any(v in cell for v in TAGS_FREQUENT_VEG):
-                veg_count += 1
-                if veg_count > 1: # 當週不重複
-                    logs.append({"日期": date_label, "項目": cell, "原因": "❌食材重複：豆芽/銀芽類當週頻率過高"})
-
-            # 4. 強烈調味重複
-            for s in TAGS_SEASONING:
-                if s in cell:
-                    if s in seasoning_set:
-                        logs.append({"日期": date_label, "項目": cell, "原因": f"❌口味單調：當週已出現過「{s}」調味"})
-                    seasoning_set.add(s)
+            # C. 豆芽頻率控管 (郁恩專業意見) 
+            if any(v in cell for v in TAGS_FREQUENT):
+                veg_counter += 1
+                if veg_counter > 1:
+                    logs.append({"日期": date_txt, "項目": cell, "原因": "❌食材重複：豆芽類當週出現過高"})
 
     return logs
 
 # --- 介面呈現 ---
-st.title("🛡️ 康橋膳食稽核系統 (114學年合約規格版)")
-st.info("已同步營養師初審意見：嚴查加工品規格、豆芽頻率、短週炸物限制。")
+st.title("🛡️ 康橋林口：專業對齊版稽核系統")
+st.markdown("##### 核心邏輯：將營養師專業直覺數位化，包含隱藏加工品與頻率控管。")
 
-f = st.file_uploader("上傳菜單 Excel", type=["xlsx"])
+f = st.file_uploader("📂 請上傳菜單 Excel", type=["xlsx"])
 if f:
     sheets = pd.read_excel(f, sheet_name=None, header=None)
     all_res = []
     for sn, df in sheets.items():
-        res = audit_expert_logic(df, sn)
+        res = expert_audit(df, sn)
         for r in res: r['分頁'] = sn; all_res.append(r)
     
     if all_res:
-        st.error(f"🚩 偵測到 {len(all_res)} 項不合規，請要求廠商依合約修正：")
+        st.error(f"🚨 系統依據營養師標準發現 {len(all_res)} 項疑義：")
         st.table(pd.DataFrame(all_res)[['分頁', '日期', '項目', '原因']])
     else:
-        st.success("✅ 本週菜單符合合約與營養師初步審核標準。")
+        st.success("✅ 檢查完畢！本週菜單符合專業與合約標準。")
